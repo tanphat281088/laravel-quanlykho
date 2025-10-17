@@ -3,52 +3,46 @@
 namespace App\Modules\KhachHang\Validates;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class UpdateKhachHangRequest extends FormRequest
 {
-  /**
-   * Determine if the user is authorized to make this request.
-   */
-  public function authorize(): bool
-  {
-    return true;
-  }
+    public function authorize(): bool
+    {
+        return true;
+    }
 
-  /**
-   * Get the validation rules that apply to the request.
-   *
-   * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
-   */
-  public function rules(): array
-  {
-    return [
-      // Thêm các quy tắc validation cho cập nhật KhachHang ở đây
-      'ten_khach_hang' => 'sometimes|required|string|max:255',
-      'email' => 'sometimes|required|email|max:255|unique:khach_hangs,email,' . $this->id,
-      'so_dien_thoai' => 'sometimes|required|string|max:255|unique:khach_hangs,so_dien_thoai,' . $this->id,
-      'dia_chi' => 'sometimes|required|string|max:255',
-      'ghi_chu' => 'nullable|string|max:255',
-    ];
-  }
+    public function rules(): array
+    {
+        // Lấy id từ route để bỏ qua unique khi cập nhật
+        $id = $this->route('id');
 
-  /**
-   * Get the error messages for the defined validation rules.
-   *
-   * @return array<string, string>
-   */
-  public function messages(): array
-  {
-    return [
-      'ten_khach_hang.required' => 'Tên khách hàng là bắt buộc',
-      'ten_khach_hang.max' => 'Tên khách hàng không được vượt quá 255 ký tự',
-      'email.required' => 'Email là bắt buộc',
-      'email.email' => 'Email không hợp lệ',
-      'email.max' => 'Email không được vượt quá 255 ký tự',
-      'email.unique' => 'Email đã tồn tại',
-      'so_dien_thoai.required' => 'Số điện thoại là bắt buộc',
-      'so_dien_thoai.max' => 'Số điện thoại không được vượt quá 255 ký tự',
-      'so_dien_thoai.unique' => 'Số điện thoại đã tồn tại',
-      'dia_chi.required' => 'Địa chỉ là bắt buộc',
-    ];
-  }
+        return [
+            // Sửa mềm (không bắt nhập lại toàn bộ), email KHÔNG bắt buộc
+            'ten_khach_hang'     => ['sometimes','string','max:255'],
+            'email'              => ['sometimes','nullable','email','max:255',
+                                     Rule::unique('khach_hangs','email')->ignore($id)
+                                         ->where(fn($q) => $q->whereNotNull('email'))],
+            'so_dien_thoai'      => ['sometimes','string','max:20',
+                                     Rule::unique('khach_hangs','so_dien_thoai')->ignore($id)],
+            'dia_chi'            => ['sometimes','nullable','string','max:500'],
+            'ghi_chu'            => ['sometimes','nullable','string','max:2000'],
+
+            // CRM (đổi pipeline -> tinh_trang_khach)
+            'tinh_trang_khach'   => ['sometimes','nullable','string','max:100'],
+            'kenh_lien_he'       => ['sometimes','nullable','string','max:150'],
+            'staff_id'           => ['sometimes','nullable','integer','exists:users,id'],
+            'loai_khach_hang_id' => ['sometimes','nullable','integer','exists:loai_khach_hangs,id'],
+
+            // Trường hệ thống/khác
+            'ma_khach_hang'      => ['sometimes','nullable','string','max:50'],
+            'trang_thai'         => ['sometimes','nullable','integer','in:0,1'],
+            'cong_no'            => ['sometimes','nullable','numeric'],
+            'doanh_thu_tich_luy' => ['sometimes','nullable','integer'],
+            'diem_tich_luy'      => ['sometimes','nullable','integer'],
+            // BỎ: 'hang_thanh_vien'
+            'ngay_cap_nhat_hang' => ['sometimes','nullable','date'],
+            'ngay_lien_he'       => ['sometimes','nullable','date'],
+        ];
+    }
 }

@@ -15,13 +15,22 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use App\Models\LoaiKhachHang;
 
+// BỔ SUNG
+use App\Services\CustomerTotalsService;
+use App\Support\Phone;
+use App\Models\KhachHang;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
 class KhachHangController extends Controller
 {
   protected $khachHangService;
+  protected $totalsService; // BỔ SUNG
 
-  public function __construct(KhachHangService $khachHangService)
+  public function __construct(KhachHangService $khachHangService, CustomerTotalsService $totalsService)
   {
     $this->khachHangService = $khachHangService;
+    $this->totalsService    = $totalsService; // BỔ SUNG
   }
 
   /**
@@ -103,55 +112,54 @@ class KhachHangController extends Controller
     return CustomResponse::success([], 'Xóa thành công');
   }
 
+  /**
+   * Options cho dropdown: statuses(pipeline) / channels / staff / types
+   * Trả đúng format FE đang parse; đồng thời giữ 'pipelines' để tương thích ngược.
+   */
   public function getOptions()
   {
-    $result = $this->khachHangService->getOptions();
-
-    if ($result instanceof \Illuminate\Http\JsonResponse) {
-      return $result;
-    }
-
-    return CustomResponse::success($result);
-  }
-
-  public function downloadTemplateExcel()
-  {
-    $path = public_path('mau-excel/KhachHang.xlsx');
-
-    if (!file_exists($path)) {
-      return CustomResponse::error('File không tồn tại');
-    }
-
-    return response()->download($path);
-  }
-
-  public function importExcel(Request $request)
-  {
-    $request->validate([
-      'file' => 'required|file|mimes:xlsx,xls,csv',
-    ]);
-
     try {
-      $data = $request->file('file');
-      $filename = Str::random(10) . '.' . $data->getClientOriginalExtension();
-      $path = $data->move(public_path('excel'), $filename);
+      $pipelines = DB::table('pipelines')
+        ->where('active', 1)
+        ->orderBy('sort_order')
+        ->pluck('name')
+        ->values();
 
-      $import = new KhachHangImport($path);
-      Excel::import($import, $path);
+      $channels = DB::table('channels')
+        ->where('active', 1)
+        ->orderBy('id')
+        ->pluck('name')
+        ->values();
 
-      $thanhCong = $import->getThanhCong();
-      $thatBai = $import->getThatBai();
+      $staff = DB::table('users')
+        ->select('id', 'name')
+        ->orderBy('name')
+        ->get();
 
-      if ($thatBai > 0) {
-        return CustomResponse::error('Import không thành công. Có ' . $thatBai . ' bản ghi lỗi và ' . $thanhCong . ' bản ghi thành công');
-      }
+      $types = DB::table('loai_khach_hangs')
+        ->select('id', 'ten_loai_khach_hang')
+        ->orderBy('nguong_doanh_thu')
+        ->get();
 
-      return CustomResponse::success([
-        'success' => $thanhCong,
-        'fail' => $thatBai
-      ], 'Import thành công ' . $thanhCong . ' bản ghi');
-    } catch (\Exception $e) {
-      return CustomResponse::error('Lỗi import: ' . $e->getMessage(), 500);
+      // tên mới cho Pipeline là "statuses" (Tình trạng khách)
+      $statuses = $pipelines;
+
+      // Log chẩn đoán
+      Log::info('[KH OPTIONS]', [
+        'db'        => env('DB_DATABASE'),
+        'pipelines' => $pipelines->count(),
+        'channels'  => $channels->count(),
+        'staff'     => $staff->count(),
+        'types'     => $types->count(),
+      ]);
+
+      // DỮ LIỆU TRẢ VỀ — khớp FE
+      $payload = compact('statuses','pipelines', 'channels', 'staff', 'types');
+      return CustomResponse::success($payload);
+
+    } catch (\Throwable $e) {
+      Log::error('[KH OPTIONS][ERR] '.$e->getMessage());
+      return CustomResponse::error('Lỗi lấy options: '.$e->getMessage(), 500);
     }
   }
 
@@ -203,5 +211,60 @@ class KhachHangController extends Controller
     } catch (\Exception $e) {
       return CustomResponse::error('Lỗi tạo file Excel: ' . $e->getMessage(), 500);
     }
+  }
+
+  // =========================
+  // BỔ SUNG 2 API CHUYÊN CRM
+  // =========================
+
+  /**
+   * Tra cứu khách theo SĐT (chuẩn hoá + tìm nhanh)
+   * GET /api/khach-hang/lookup/phone?phone=...
+   */
+  public function lookupByPhone(Request $request)
+  {
+    $phone = Phone::normalize($request->get('phone'));
+    if (!$phone) {
+      return CustomResponse::error('Thiếu số điện thoại', 422);
+    }
+
+    // Ưu tiên dùng service nếu bạn đã có, fallback Model để độc lập
+    $kh = method_exists($this->khachHangService, 'findByPhone')
+      ? $this->khachHangService->findByPhone($phone)
+      : KhachHang::with('loaiKhachHang:id,ten_loai_khach_hang')
+          ->where('so_dien_thoai', $phone)->first();
+
+    if (!$kh) {
+      return CustomResponse::success(['found' => false]);
+    }
+
+    return CustomResponse::success([
+      'found'               => true,
+      'id'                  => $kh->id,
+      'code'                => $kh->ma_khach_hang,
+      'name'                => $kh->ten_khach_hang,
+      // BỎ 'tier' (hạng thành viên). Thay bằng loại khách hàng hiện tại:
+      'loai_khach_hang_id'  => $kh->loai_khach_hang_id,
+      'loai_khach_hang'     => optional($kh->loaiKhachHang)->ten_loai_khach_hang,
+      'total'               => (int) ($kh->doanh_thu_tich_luy ?? 0),
+      'phone'               => $kh->so_dien_thoai,
+      'status'              => ($kh->doanh_thu_tich_luy ?? 0) > 0 ? 'Khách cũ' : 'Tiềm năng',
+    ]);
+  }
+
+  /**
+   * Ép tính lại doanh thu/điểm/hạng (giờ chỉ cập nhật loại KH + ngày cập nhật)
+   * POST /api/khach-hang/{id}/recalc
+   */
+  public function recalc($id)
+  {
+    $this->totalsService->refresh((int)$id);
+
+    // trả về record sau khi refresh
+    $result = $this->khachHangService->getById($id);
+    if ($result instanceof \Illuminate\Http\JsonResponse) {
+      return $result;
+    }
+    return CustomResponse::success($result, 'Đã tính lại theo doanh thu');
   }
 }
